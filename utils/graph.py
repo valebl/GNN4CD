@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial.distance import cdist
 
 
 #-----------------------------------------------------
@@ -96,4 +97,43 @@ def derive_edge_index_within(lon_radius, lat_radius, lon_senders, lat_senders, l
     edge_index = np.array(edge_index).T
     print(edge_index.shape)
 
+    return edge_index
+
+def derive_edge_index_multiscale(lon_senders, lat_senders, lon_receivers, lat_receivers, k, undirected=False, use_edge_attr=True):
+    '''
+    Derives edge_indexes between two sets of nodes based on specified number of neighbours k
+    Args:
+        lon_low (np.array): longitudes of all first nodes in the edges
+        lat_low (np.array): latitudes of all fisrt nodes in the edges
+        lon_high (np.array): longitudes of all second nodes in the edges
+        lat_high (np.array): latitudes of all second nodes in the edges
+        k (int): the number of neighbours
+    Return:
+        The edge_indexes tensor
+    '''
+    edge_index = []
+    edge_attr = []
+
+    lonlat_senders = np.column_stack((lon_senders, lat_senders))
+    lonlat_receivers = np.column_stack((lon_receivers,lat_receivers))
+
+    dist = cdist(lonlat_receivers, lonlat_senders, metric='euclidean')
+    neighbours = np.argsort(dist, axis=-1)[:, :k]
+    # _ , neighbours = dist.topk(k, largest=False, dim=-1)
+
+    for n_n2 in range(lonlat_receivers.shape[0]):
+        for n_n1 in neighbours[n_n2,:]:
+            if n_n1 == n_n2:
+                continue
+            # if np.abs(lon_receivers[n_n2] - lon_senders[n_n1]) > 0.01 and np.abs(lat_receivers[n_n2] - lat_senders[n_n1]) > 0.01:
+            #     print(np.abs(lon_receivers[n_n2] - lon_senders[n_n1]), np.abs(lat_receivers[n_n2] - lat_senders[n_n1]))
+            #     continue
+            if [n_n1, n_n2] not in edge_index:
+                edge_index.append([n_n1, n_n2])
+            # edge_attr.append(dist[n_n2, n_n1])
+            if undirected and [n_n2, n_n1] not in edge_index:
+                edge_index.append([n_n2, n_n1])
+
+    edge_index = np.array(edge_index).T
+    
     return edge_index

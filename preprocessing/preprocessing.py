@@ -160,8 +160,8 @@ write_log(f"\n\nStarting the preprocessing of high resolution data.", args, acce
 #-------------------------------#
 
 write_log(f"\nLoading target and topography.", args, accelerator=None, mode='a')
-dataset_high = xr.open_dataset(args.input_path_gripho + args.gripho_file)
-topo = xr.open_dataset(args.input_path_topo + args.topo_file)
+dataset_high = xr.open_dataset(args.input_path_gripho + args.gripho_file, engine="netcdf4")
+topo = xr.open_dataset(args.input_path_topo + args.topo_file, engine="netcdf4")
 
 lon = dataset_high.lon.to_numpy()
 lat = dataset_high.lat.to_numpy()
@@ -322,11 +322,9 @@ else:
 
 # High within High
 low_high_graph['high', 'within', 'high'].edge_index = torch.tensor(edges_high)
-low_high_graph['high', 'within', 'high'].edge_attr = torch.tensor(edges_high_attr).float()
 
 # Low to High
 low_high_graph['low', 'to', 'high'].edge_index = torch.tensor(edges_low2high)
-low_high_graph['low', 'to', 'high'].edge_attr = torch.tensor(edges_low2high_attr).float()
 
 #-- WRITE THE GRAPH --#
 
