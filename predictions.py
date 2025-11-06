@@ -4,7 +4,6 @@ import torch
 import argparse
 import time
 import os
-import matplotlib.pyplot as plt
 import importlib
 
 import safetensors
@@ -20,8 +19,6 @@ from dataset import Dataset_Graph, Iterable_Graph
 from utils.tools import date_to_idxs, set_seed_everything
 from utils.train_test import Tester
 
-from utils.plots import create_zones, extremes_cmap
-from utils.plots import plot_maps, plot_single_map, plot_mean_time_series, plot_seasonal_maps
 from utils.tools import date_to_idxs, write_log, standardize_input
         
 
@@ -43,7 +40,7 @@ parser.add_argument('--target_file', type=str, default="pr_target.pkl")
 parser.add_argument('--model_type', type=str, default=None)
 parser.add_argument('--model', type=str, default=None) 
 parser.add_argument('--dataset_name', type=str, default=None) 
-parser.add_argument('--mode', type=str, default="cl_reg") 
+parser.add_argument('--mode', type=str, default="RC") 
 parser.add_argument('--test_idxs_file', type=str, default="")
 parser.add_argument('--stats_mode', type=str, default="var") 
 parser.add_argument('--target_type', type=str, default="precipitation")
@@ -164,9 +161,9 @@ if __name__ == '__main__':
 
     model_file = importlib.import_module(f"models.{args.model_typel}")
     Model = getattr(model_file, args.model_typel)
-    if args.model_type == "cl_reg":
-        model_cl = Model(seq_l=args.seq_l+1)
-        model_reg = Model(seq_l=args.seq_l+1)
+    if args.model_type == "RC":
+        model_C = Model(seq_l=args.seq_l+1)
+        model_R = Model(seq_l=args.seq_l+1)
     else:
         if args.target_type == "temperature":
             model = Model(h_in=4*5, h_hid=4*5, high_in=1)
@@ -174,14 +171,14 @@ if __name__ == '__main__':
             model = model = Model(seq_l=args.seq_l+1)
 
     if accelerator is None:
-        if args.model_type == "cl_reg":
+        if args.model_type == "RC":
             checkpoint_cl = torch.load(args.train_path_cl+args.checkpoint_cl, map_location=torch.device('cpu'), weights_only=True)
             checkpoint_reg = torch.load(args.train_path_reg+args.checkpoint_reg, map_location=torch.device('cpu'), weights_only=True)
         else:
             checkpoint_reg = torch.load(args.train_path_reg+args.checkpoint_reg, map_location=torch.device('cpu'), weights_only=True)
         device = 'cpu'
     else:
-        if args.model_type == "cl_reg":
+        if args.model_type == "RC":
             try:
                 checkpoint_cl = torch.load(args.train_path_cl+args.checkpoint_cl+"/pytorch_model.bin", weights_only=True)
             except:
@@ -201,15 +198,15 @@ if __name__ == '__main__':
         device = accelerator.device
     
     write_log("\nLoading state dict.", args, accelerator, 'a')
-    if args.model_type == "cl_reg":
-        model_cl.load_state_dict(checkpoint_cl)
-        model_reg.load_state_dict(checkpoint_reg)
+    if args.model_type == "RC":
+        model_C.load_state_dict(checkpoint_cl)
+        model_R.load_state_dict(checkpoint_reg)
     else:
         model.load_state_dict(checkpoint_reg)
 
     if accelerator is not None:
-        if args.model_type == "cl_reg":
-            model_cl, model_reg, dataloader = accelerator.prepare(model_cl, model_reg, dataloader)
+        if args.model_type == "RC":
+            model_C, model_R, dataloader = accelerator.prepare(model_C, model_R, dataloader)
         else:
             model, dataloader = accelerator.prepare(model, dataloader)
 
@@ -232,14 +229,31 @@ if __name__ == '__main__':
 
     end = time.time()
 
-    # Create the pyg object
-    data = HeteroData()
+    ### POST-PROCESS
+    pr_target = pr_target[:,test_idxs].numpy()
 
+    threshold = 0.1
+    mask_nan = np.isnan(pr_target)
+    pr_target[pr_target < threshold] = 0
+    pr_target = np.round(pr_target, decimals=1)
+
+    mask =  degree > 2 * np.array([~np.isnan(pr_target[i,:]).all() for i in range(pr_target.shape[0])])
+    mask_nan = mask_nan[mask,:]
+
+    pr_target = pr_target[mask,:]
+    pr_target[mask_nan] = np.nan
+    degree = degree[mask]
+  
+    # LON LAT
+    lat_low = low_high_graph["low"].lat.cpu().numpy()
+    lon_low = low_high_graph["low"].lon.cpu().numpy()
+    lat_high = low_high_graph["high"].lat.cpu().numpy()[mask]
+    lon_high = low_high_graph["high"].lon.cpu().numpy()[mask]
+
+    # Gather the values in *tensors* across all processes and concatenate them on the first dimension. Useful to
+    # regroup the predictions from all processes when doing evaluation.
     if accelerator is not None:
         accelerator.wait_for_everyone()
-
-        # Gather the values in *tensors* across all processes and concatenate them on the first dimension. Useful to
-        # regroup the predictions from all processes when doing evaluation.
 
         times = accelerator.gather(times).squeeze()
 
@@ -252,31 +266,185 @@ if __name__ == '__main__':
             pr_Rall = accelerator.gather(pr_R)
         elif args.model_type == "C":
             pr_C = accelerator.gather(pr_C)
-    
+
+
     times, indices = torch.sort(times)
+    times = times.cpu().numpy()
+    indices = indices.cpu().numpy()
+
     if args.model_type == "RC":
-        pr_R = accelerator.gather(pr_R).squeeze().swapaxes(0,1)[:,indices].cpu().numpy()
-        pr_C = accelerator.gather(pr_C).squeeze().swapaxes(0,1)[:,indices].cpu().numpy()
+        # not processed R and C outputs
+        pr_R = pr_R.squeeze().swapaxes(0,1).cpu().numpy()[:,indices]
+        pr_C = pr_C.squeeze().swapaxes(0,1).cpu().numpy()[:,indices]
+        # processed estimates, ready to use
+        pr = np.where(np.isfinite(np.expm1(pr_R)), np.expm1(pr_R), np.nan) * np.where(pr_C < threshold, 0.0, 1.0)
+        pr = pr[mask,:]; [pr<threshold] = 0; pr[mask_nan] = np.nan
+        # no Rall estimates in this case
+        pr_Rall = None
     elif args.model_type == "R":
-        pr_R = accelerator.gather(pr_R).squeeze().swapaxes(0,1)[:,indices].cpu().numpy()
+        # not processed R output
+        pr_R = pr_R.squeeze().swapaxes(0,1).cpu().numpy()[:,indices]
+        # no C, RC or Rall estimates in this case
+        pr_C = None
+        pr = None
+        pr_Rall = None
     elif args.model_type == "Rall":
-        pr_Rall = accelerator.gather(pr_R).squeeze().swapaxes(0,1)[:,indices].cpu().numpy()
+        # not processed Rall output
+        pr_Rall = pr_Rall.squeeze().swapaxes(0,1).cpu().numpy()[:,indices]
+        # no R, C estimates in this case
+        pr_R = None
+        pr_C = None
+        # processed estimates, ready to use
+        pr = np.where(np.isfinite(np.expm1(pr_R)), np.expm1(pr_R), np.nan)
+        pr = pr[mask,:]; [pr<threshold] = 0; pr[mask_nan] = np.nan
     elif args.model_type == "C":
-        pr_C = accelerator.gather(pr_C).squeeze().swapaxes(0,1)[:,indices].cpu().numpy()
+        # not processed C output
+        pr_C = pr_C.squeeze().swapaxes(0,1).cpu().numpy()[:,indices]
+        # no R, RC or Rall estimates in this case
+        pr_R = None
+        pr = None
+        pr_Rall = None
 
+    # Create the pyg object
+    data = HeteroData()
     
-    data.pr_target = pr_target[:,test_idxs].cpu().numpy()
-    data.times = times.cpu().numpy()
-    data["low"].lat = low_high_graph["low"].lat.cpu().numpy()
-    data["low"].lon = low_high_graph["low"].lon.cpu().numpy()
-    data["high"].lat = low_high_graph["high"].lat.cpu().numpy()
-    data["high"].lon = low_high_graph["high"].lon.cpu().numpy()
-
-    degree = degree(low_high_graph['high', 'within', 'high'].edge_index[0], low_high_graph['high'].num_nodes)
+    data.pr_target = pr_target
+    data.times = times
+    data["low"].lat = lat_low
+    data["low"].lon = lon_low
+    data["high"].lat = lat_high
+    data["high"].lon = lon_high
     data["high"].degree = degree.cpu().numpy()
+
+    data.pr_R_raw = pr_R
+    data.pr_C_raw = pr_C
+    data.pr_Rall_raw = pr_Rall
+    data.pr = pr
     
     write_log(f"\nDone. Testing concluded in {end-start} seconds.\nWrite the files.", args, accelerator, 'a')
 
     if accelerator is None or accelerator.is_main_process:
         with open(args.output_path + args.output_file, 'wb') as f:
             pickle.dump(data, f)
+
+
+    ## OPTIONAL: create a dictionary with some ready-to-use results
+    results = {}
+    results["lon"] = lon_high
+    results["lat"] = lat_high
+    results["times"] = times
+    results["pr_gripho"] = pr_target
+    results["pr_gnn4cd"] = pr
+
+    # sesasons
+
+    pr_pred_seasons = []
+    pr_target_seasons = []
+
+    jf_start, jf_end = date_to_idxs(year_start=2007, month_start=1,day_start=1,year_end=2007,month_end=2,day_end=28,first_year=2007,first_month=1,first_day=1)
+    mam_start, mam_end = date_to_idxs(year_start=2007, month_start=3,day_start=1,year_end=2007,month_end=5,day_end=31,first_year=2007,first_month=1,first_day=1)
+    jja_start, jja_end = date_to_idxs(year_start=2007, month_start=6,day_start=1,year_end=2007,month_end=8,day_end=31,first_year=2007,first_month=1,first_day=1)
+    son_start, son_end = date_to_idxs(year_start=2007, month_start=9,day_start=1,year_end=2007,month_end=11,day_end=30,first_year=2007,first_month=1,first_day=1)
+
+    d_start, d_end = date_to_idxs(year_start=2007, month_start=12,day_start=1,year_end=2007,month_end=12,day_end=31,first_year=2007,first_month=1,first_day=1)
+
+    djf_idxs = np.arange(jf_start, jf_end).tolist()
+    djf_idxs.extend(np.arange(d_start, d_end).tolist())
+
+    pr_pred_seasons.append(pr[:,djf_idxs])
+    pr_pred_seasons.append(pr[:,mam_start: mam_end])
+    pr_pred_seasons.append(pr[:,jja_start: jja_end])
+    pr_pred_seasons.append(pr[:,son_start: son_end])
+
+    pr_target_seasons.append(pr_target[:,djf_idxs])
+    pr_target_seasons.append(pr_target[:,mam_start: mam_end])
+    pr_target_seasons.append(pr_target[:,jja_start: jja_end])
+    pr_target_seasons.append(pr_target[:,son_start: son_end])
+
+    results["pr_gnn4cd_seasons"] = pr_pred_seasons
+    results["pr_gripho_seasons"] = pr_target_seasons
+
+    # Mean percentage bias
+
+    pr_bias_avg = np.nanmean(pr, axis=1) - np.nanmean(pr_target, axis=1)
+    pr_bias_percentage_avg = pr_bias_avg / np.nanmean(pr_target, axis=1) * 100
+
+    results["pr_bias_percentage_avg"] = pr_bias_percentage_avg
+
+    # Diurnal cycles
+
+    pr_pred_seasons_daily_cycle = np.zeros((4,24))
+    for s in range(4):
+        pr_season = pr_pred_seasons[s]
+        for i in range(0,24):
+            pr_pred_seasons_daily_cycle[s,i] = np.nanmean(pr_season[:,i::24])
+
+    pr_gripho_seasons_daily_cycle = np.zeros((4,24))
+    for s in range(4):
+        pr_season = pr_target_seasons[s]
+        for i in range(0,24):
+            pr_gripho_seasons_daily_cycle[s,i] = np.nanmean(pr_season[:,i::24])
+
+    t_gripho = 0.1
+    t = 0.1
+    pr_pred_seasons_daily_cycle_intensity = np.zeros((4,24))
+    pr_pred_seasons_daily_cycle_frequency = np.zeros((4,24))
+    for s in range(4):
+        pr_season = pr_pred_seasons[s]
+        for i in range(0,24):
+            pr_pred_seasons_daily_cycle_intensity[s,i] = np.nanmean(pr_season[:,i::24][pr_season[:,i::24]>=t])
+            pr_pred_seasons_daily_cycle_frequency[s,i] = (pr_season[:,i::24]>=t).sum() / pr_season[:,i::24].flatten().shape[0] * 100
+
+    pr_gripho_seasons_daily_cycle_intensity = np.zeros((4,24))
+    pr_gripho_seasons_daily_cycle_frequency = np.zeros((4,24))
+    for s in range(4):
+        pr_season = pr_target_seasons[s]
+        for i in range(0,24):
+            pr_gripho_seasons_daily_cycle_intensity[s,i] = np.nanmean(pr_season[:,i::24][pr_season[:,i::24]>=t_gripho])
+            pr_gripho_seasons_daily_cycle_frequency[s,i] = (pr_season[:,i::24]>=t_gripho).sum() / pr_season[:,i::24].flatten().shape[0] * 100
+
+    results["pr_gnn4cd_seasons_daily_cycle"] = pr_pred_seasons_daily_cycle
+    results["pr_gripho_seasons_daily_cycle"] = pr_gripho_seasons_daily_cycle
+    results["pr_gnn4cd_seasons_daily_cycle_intensity"] = pr_pred_seasons_daily_cycle_intensity
+    results["pr_gnn4cd_seasons_daily_cycle_frequency"] = pr_pred_seasons_daily_cycle_frequency
+    results["pr_gripho_seasons_daily_cycle_intensity"] = pr_gripho_seasons_daily_cycle_intensity
+    results["pr_gripho_seasons_daily_cycle_frequency"] = pr_gripho_seasons_daily_cycle_frequency
+
+    # PDF
+
+    hist_y, bin_edges_y = np.histogram(pr_target.flatten(), bins=np.arange(0,200,0.5).astype(np.float32), density=False)
+    hist_pr, bin_edges_pr = np.histogram(pr.flatten(), bins=np.arange(0,200,0.5).astype(np.float32), density=False)
+
+    Ntot_y = hist_y.sum()
+    Ntot_pr = hist_pr.sum()
+
+    bin_edges_y_centre = (bin_edges_y[:-1] + bin_edges_y[1:]) / 2
+    bin_edges_pr_centre = (bin_edges_pr[:-1] + bin_edges_pr[1:]) / 2
+
+    results["bin_edges_centre_gripho"] = bin_edges_y_centre
+    results["bin_edges_centre_gnn4cd"] = bin_edges_pr_centre
+    results["hist/Ntot_gripho"] = hist_y/Ntot_y
+    results["hist/Ntot_gnn4cd"] = hist_pr/Ntot_pr
+
+    # EXTREME PERCENTILES
+
+    p99_y = np.nanpercentile(pr_target, q=99, axis=1)
+    p99_pred = np.nanpercentile(pr, q=99, axis=1)
+    p99_bias = p99_pred - p99_y
+    p99_bias_percentile = p99_bias / p99_y * 100
+
+    p999_y = np.nanpercentile(pr_target, q=99.9, axis=1)
+    p999_pred = np.nanpercentile(pr, q=99.9, axis=1)
+    p999_bias = p999_pred - p999_y
+    p999_bias_percentile = p999_bias / p999_y * 100
+
+    results["pr_gripho_p99"] = p99_y
+    results["pr_gnn4cd_p99"] = p99_pred
+    results["p99_bias_percentile"] = p99_bias_percentile
+    results["pr_gripho_p999"] = p999_y
+    results["pr_gnn4cd_p999"] = p999_pred
+    results["p999_bias_percentile"] = p999_bias_percentile
+
+    if accelerator is None or accelerator.is_main_process:
+        with open(args.output_path + "results_dict.pkl", 'wb') as f:
+            pickle.dump(results, f)

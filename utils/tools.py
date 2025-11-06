@@ -175,25 +175,13 @@ def compute_input_statistics(x_low, x_high, args, accelerator=None):
     write_log(f'\nComputing statistics for the low-res input data.', args, accelerator, 'a')
 
     # Low-res data
-    if args.stats_mode == "var":
-        means_low = np.zeros((5))
-        stds_low = np.zeros((5))
-        for var in range(5):
-            m = np.nanmean(x_low[:,:,var,:]) # num_nodes, time, vars, levels
-            s = np.nanstd(x_low[:,:,var,:])  # num_nodes, time, vars, levels
-            means_low[var] = m
-            stds_low[var] = s
-    elif args.stats_mode == "field":
-        means_low = np.zeros((5,5))
-        stds_low = np.zeros((5,5))
-        for var in range(5):
-            for lev in range(5):
-                m = np.nanmean(x_low[:,:,var,lev])  # num_nodes, time, vars, levels
-                s = np.nanstd(x_low[:,:,var,lev])   # num_nodes, time, vars, levels
-                means_low[var, lev] = m
-                stds_low[var, lev] = s
-    else:
-        raise Exception("Arg 'stats_mode' should be either 'var' or 'field'")
+    means_low = np.zeros((5))
+    stds_low = np.zeros((5))
+    for var in range(5):
+        m = np.nanmean(x_low[:,:,var,:]) # num_nodes, time, vars, levels
+        s = np.nanstd(x_low[:,:,var,:])  # num_nodes, time, vars, levels
+        means_low[var] = m
+        stds_low[var] = s
 
     write_log(f'\nComputing statistics for the high-res input data.', args, accelerator, 'a')
 
@@ -218,28 +206,16 @@ def compute_input_statistics(x_low, x_high, args, accelerator=None):
     return means_low, stds_low, means_high, stds_high
 
 
-def standardize_input(x_low, x_high, means_low, stds_low, means_high, stds_high, args=None, accelerator=None, stats_mode_default="var"):
+def standardize_input(x_low, x_high, means_low, stds_low, means_high, stds_high, args=None, accelerator=None):
 
     write_log(f'\nStandardizing the low-res input data.', args, accelerator, 'a')
 
     # Preallocate memory efficiently
     x_low_standard = torch.empty_like(x_low, dtype=torch.float32)
 
-    if args is not None:
-        stats_mode = args.stats_mode
-    else:
-        stats_mode = stats_mode_default
-
     # Standardize the data
-    if stats_mode == "var":
-        for var in range(5):
-            x_low_standard[:,:,var,:] = (x_low[:,:,var,:]-means_low[var])/stds_low[var]  # num_nodes, time, vars, levels
-    elif stats_mode == "field":
-        for var in range(5):
-            for lev in range(5):
-                x_low_standard[:,:,var,lev] = (x_low[:,:,var,lev]-means_low[var, lev])/stds_low[var, lev]  # num_nodes, time, vars, levels
-    else:
-        raise Exception("Arg 'stats_mode' should be either 'var' or 'field'")
+    for var in range(5):
+        x_low_standard[:,:,var,:] = (x_low[:,:,var,:]-means_low[var])/stds_low[var]  # num_nodes, time, vars, levels
 
     write_log(f'\nStandardizing the high-res input data.', args, accelerator, 'a')
 
@@ -250,7 +226,7 @@ def standardize_input(x_low, x_high, means_low, stds_low, means_high, stds_high,
         x_high_standard[:,0] = (x_high[:,0] - means_high[0]) / stds_high[0]
         x_high_standard[:,1:] = (x_high[:,1:] - means_high[1]) / stds_high[1]
     else:
-        x_high_standard = x_high - means_high / stds_high
+        x_high_standard = (x_high - means_high) / stds_high
 
     return x_low_standard, x_high_standard
 
@@ -268,14 +244,14 @@ def prepare_target(target_train, model_type, threshold = 0.1):
     # round to comply with instrument sensitivity
     target_train = torch.round(target_train, decimals=1)
 
-    if model_type == "cl":
+    if model_type == "C":
         #-- CLASSIFIER --#        
         target_train = torch.where(target_train >= threshold, 1, 0).float()
-    elif model_type == "reg":
+    elif model_type == "R":
         #-- REGRESSOR ON pr >=threshold --#    
         target_train = torch.log1p(target_train)
         target_train[mask_threshold] = torch.nan
-    elif model_type == "all":
+    elif model_type == "Rall":
         #-- REGRESSOR ON ALL --#
         target_train = torch.log1p(target_train)
 

@@ -41,7 +41,7 @@ parser.add_argument('--weight_decay', type=float, default=0.0, help='weight deca
 parser.add_argument('--lr_scheduler', type=str, default="StepLR")
 
 parser.add_argument('--loss_fn', type=str, default="mse_loss")
-parser.add_argument('--alpha', type=float, default=None)
+parser.add_argument('--alpha', type=float, default=0.0)
 parser.add_argument('--seed', type=int)
 parser.add_argument('--n_gpu', type=int, default=4)
 
@@ -123,7 +123,7 @@ if __name__ == '__main__':
     if args.model_type == 'C':
         loss_fn = getattr(torchvision.ops, args.loss_fn)
     elif args.model_type == 'R' or args.model_type == 'Rall':
-        loss_fn = getattr(utils.loss_functions, args.loss_fn)(alpha=args.alpha)    
+        loss_fn = getattr(utils.loss_functions, args.loss_fn)()
 
     #-----------------------------------------------------
     #--------------- TARGET AND INDEXES ------------------

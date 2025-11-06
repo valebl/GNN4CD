@@ -285,7 +285,7 @@ target_high = torch.tensor(target_high)
 write_log("\nWriting some files...", args, accelerator=None, mode='a')
 
 #-- WRITE THE FILES --#       
-with open(args.output_path + 'pr_target.pkl', 'wb') as f:
+with open(args.output_path + 'target.pkl', 'wb') as f:
     pickle.dump(target_high, f)
 
 #### IMPORTANT CHANGE - NORMALIZATION NOW IN MAIN AND PREDICTION #### 
